@@ -76,7 +76,7 @@ hookspath.append(kivymd_hooks_path)
 hookspath.append(SPECPATH)
 
 # Exclude problematic modules
-excludes = kivy_deps.get('excludes', []) + ["scipy", "pandas", "numpy", "matplotlib", "docutils"]
+excludes = kivy_deps.get('excludes', []) + ["scipy", "pandas", "numpy", "matplotlib", "docutils", "pygame", "pygame_base", "ffpyplayer"]
 if is_windows:
     excludes.append("mkl")
 

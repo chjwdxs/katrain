@@ -95,7 +95,10 @@ class BadukPanWidget(Widget):
             return
         xd, xp, yd, yp = self._find_closest(touch.x, touch.y)
         prev_ghost = self.ghost_stone
-        if max(yd, xd) < self.grid_size / 2 and (xp, yp) not in [m.coords for m in self.katrain.game.stones]:
+        fog = getattr(self.katrain, "fog", None)
+        fog_enabled = fog is not None
+        occupied_positions = [m.coords for m in self.katrain.game.stones]
+        if max(yd, xd) < self.grid_size / 2 and (fog_enabled or (xp, yp) not in occupied_positions):
             self.ghost_stone = (xp, yp)
         else:
             self.ghost_stone = None
@@ -605,6 +608,19 @@ class BadukPanWidget(Widget):
         show_n_eval = self.trainer_config.get("eval_on_show_last", 3)
         ownership_grid = None
         loss_grid = None
+        fog = getattr(katrain, "fog", None)
+        fog_enabled = fog is not None
+        visible_levels = None
+        if fog_enabled:
+            # AI 思考时不显示 AI 视角，改为显示上一步走子方（通常是人类）的视野
+            if katrain.next_player_info.ai and katrain.last_player_info.human:
+                viewer = katrain.game.current_node.player  # 上一手玩家
+                visible_levels = fog.levels.get(viewer)
+            else:
+                visible_levels = getattr(katrain, "fog_view_levels", None)
+            if visible_levels is None:
+                # 保守回退：无快照时整盘视为0级，避免信息泄露与闪烁
+                visible_levels = [[0 for _ in range(board_size_x)] for _ in range(board_size_y)]
 
         with self.canvas:
             self.canvas.clear()
@@ -632,7 +648,29 @@ class BadukPanWidget(Widget):
                     self.draw_territory(loss_grid, Theme.EVAL_COLORS[self.trainer_config["theme"]][1][:3])
                 else:
                     ownership_grid = var_to_grid(ownership, (board_size_x, board_size_y))
+                    if fog_enabled and visible_levels is not None:
+                        for yy in range(board_size_y):
+                            for xx in range(board_size_x):
+                                if visible_levels[yy][xx] < 1:
+                                    ownership_grid[yy][xx] = 0
                     self.draw_territory(ownership_grid)
+            # Fog level overlay: 0/1/2 levels as dark/light/no tint
+            if fog_enabled and visible_levels is not None:
+                cell = self.grid_size
+                # Allow theme overrides; fallback defaults if not present
+                fog0 = getattr(Theme, "FOG_LEVEL0_COLOR", (0.0, 0.0, 0.0, 0.45))  # level 0: darker
+                fog1 = getattr(Theme, "FOG_LEVEL1_COLOR", (0.2, 0.2, 0.2, 0.18))  # level 1: lighter
+                for yy in range(board_size_y):
+                    for xx in range(board_size_x):
+                        lvl = visible_levels[yy][xx]
+                        if lvl >= 2:
+                            continue
+                        col = fog1 if lvl == 1 else fog0
+                        Color(*col)
+                        Rectangle(
+                            pos=(self.gridpos[yy][xx][0] - cell / 2, self.gridpos[yy][xx][1] - cell / 2),
+                            size=(cell, cell),
+                        )
             # stones
             all_dots_off = not katrain.analysis_controls.eval.active
             has_stone = {}
@@ -660,7 +698,9 @@ class BadukPanWidget(Widget):
                     new_move = (
                         current_node.move and m.coords == current_node.move.coords
                     ) and not current_node.ownership
-                    if has_stone.get(m.coords) and not drawn_stone.get(m.coords):  # skip captures, last only for
+                    if has_stone.get(m.coords) and not drawn_stone.get(m.coords) and (
+                        not fog_enabled or visible_levels[m.coords[1]][m.coords[0]] >= 1
+                    ):  # skip captures, last only for
                         move_eval_on = not all_dots_off and show_dots_for.get(m.player) and i < show_n_eval
                         if move_eval_on and points_lost is not None:
                             evalcol = self.eval_color(points_lost, show_dots_for_class)
@@ -668,10 +708,14 @@ class BadukPanWidget(Widget):
                             evalcol = None
                         inner = Theme.STONE_COLORS[m.opponent] if i == 0 and m not in placements else None
                         drawn_stone[m.coords] = m.player
+                        stone_alpha = 1.0
+                        if fog_enabled and visible_levels[m.coords[1]][m.coords[0]] == 1:
+                            stone_alpha = 0.6
                         self.draw_stone(
                             x=m.coords[0],
                             y=m.coords[1],
                             player=m.player,
+                            alpha=stone_alpha,
                             innercol=inner,
                             evalcol=evalcol,
                             evalscale=evalscale,
@@ -715,6 +759,8 @@ class BadukPanWidget(Widget):
                 for y in range(board_size_y - 1, -1, -1):
                     for x in range(board_size_x):
                         move_policy = policy_grid[y][x]
+                        if fog_enabled and visible_levels is not None and visible_levels[y][x] < 1:
+                            continue
                         if move_policy < 0:
                             continue
                         pol_order = max(0, 5 + int(math.log10(max(1e-9, move_policy - 1e-9))))
@@ -896,6 +942,19 @@ class BadukPanWidget(Widget):
         game_ended = katrain.game.end_result
         current_node = katrain.game.current_node
         next_player = current_node.next_player
+        fog = getattr(katrain, "fog", None)
+        fog_enabled = fog is not None
+        visible_levels = None
+        if fog_enabled:
+            # AI 思考时不显示 AI 视角，改为显示上一步走子方（通常是人类）的视野
+            if katrain.next_player_info.ai and katrain.last_player_info.human:
+                viewer = current_node.player  # 上一手玩家
+                visible_levels = fog.levels.get(viewer)
+            else:
+                visible_levels = getattr(katrain, "fog_view_levels", None)
+            if visible_levels is None:
+                bsx, bsy = katrain.game.board_size
+                visible_levels = [[0 for _ in range(bsx)] for _ in range(bsy)]
 
         board_size_x, board_size_y = katrain.game.board_size
         if len(self.gridpos[0]) < board_size_x or len(self.gridpos) < board_size_y:
@@ -936,6 +995,8 @@ class BadukPanWidget(Widget):
                 for move_dict in hint_moves:
                     move = Move.from_gtp(move_dict["move"])
                     if move.coords is not None:
+                        if fog_enabled and visible_levels is not None and visible_levels[move.coords[1]][move.coords[0]] < 1:
+                            continue
                         engine_best_move = move_dict.get("order", 99) == 0
                         scale = Theme.HINT_SCALE
                         text_on = True
@@ -1031,6 +1092,8 @@ class BadukPanWidget(Widget):
                 for child_node in current_node.children:
                     move = child_node.move
                     if move and move.coords is not None:
+                        if fog_enabled and visible_levels is not None and visible_levels[move.coords[1]][move.coords[0]] < 1:
+                            continue
                         if child_node.analysis_exists:
                             self.active_pv_moves.append(
                                 (move.coords, [move.gtp()] + child_node.candidate_moves[0]["pv"], current_node)

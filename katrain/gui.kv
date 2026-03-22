@@ -1001,6 +1001,31 @@
         id: player_setup
         update_global: True
     MenuLabel:
+        text: i18n._('fog:settings')
+    MDBoxLayout:
+        orientation: 'horizontal'
+        size_hint: 1, None
+        height: root.item_height
+        padding: CP_PADDING, 0
+        spacing: CP_SPACING
+        Label:
+            text: i18n._('fog:view_distance')
+            font_size: self.height * 0.45
+            size_hint_x: None
+            width: self.texture_size[0] + dp(20)
+        Slider:
+            id: fog_view_slider
+            min: 0
+            max: 9
+            step: 1
+            value: 3
+            on_value: app and app.gui and app.gui.set_fog_view_distance(self.value)
+        Label:
+            text: str(int(fog_view_slider.value))
+            font_size: self.height * 0.45
+            size_hint_x: None
+            width: dp(40)
+    MenuLabel:
         size_hint: 1,1
     MenuLabel:
     MDBoxLayout:

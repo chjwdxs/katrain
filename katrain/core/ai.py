@@ -1442,8 +1442,27 @@ def generate_ai_move(game: Game, ai_mode: str, ai_settings: Dict) -> Tuple[Move,
     """Generate a move using the selected AI strategy"""
     game.katrain.log(f"Generate AI move called with mode: {ai_mode}", OUTPUT_DEBUG)
     
-    # Create the appropriate strategy based on mode
+    # Check if AI should think under fog of war
+    ai_uses_fog = game.katrain.config("fog/ai_uses_fog", False)
+    # Use INFO level so user can see this even with debug_level=0
+    game.katrain.log(f"[AI Fog] ai_uses_fog config = {ai_uses_fog}", OUTPUT_INFO)
+    game.katrain.log(f"[AI Fog] hasattr(game, 'fog_manager') = {hasattr(game, 'fog_manager')}", OUTPUT_INFO)
+    if hasattr(game, 'fog_manager'):
+        game.katrain.log(f"[AI Fog] game.fog_manager = {game.fog_manager}", OUTPUT_INFO)
+    
+    if ai_uses_fog and hasattr(game, 'fog_manager') and game.fog_manager:
+        game.katrain.log(f"[AI Fog] AI will think under fog of war", OUTPUT_INFO)
+        move, played_node = _generate_ai_move_with_fog(game, ai_mode, ai_settings)
+    else:
+        game.katrain.log(f"[AI Fog] AI will think with full board information", OUTPUT_INFO)
+        move, played_node = _generate_ai_move_normal(game, ai_mode, ai_settings)
+    
+    game.katrain.log(f"Move generation complete: {move.gtp()}", OUTPUT_DEBUG)
+    return move, played_node
 
+def _generate_ai_move_normal(game: Game, ai_mode: str, ai_settings: Dict) -> Tuple[Move, GameNode]:
+    """Generate AI move with full board information (original behavior)"""
+    # Create the appropriate strategy based on mode
     strategy = STRATEGY_REGISTRY[ai_mode](game, ai_settings)
     
     # Generate the move
@@ -1456,5 +1475,224 @@ def generate_ai_move(game: Game, ai_mode: str, ai_settings: Dict) -> Tuple[Move,
     game.katrain.log(f"AI thoughts: {ai_thoughts}", OUTPUT_DEBUG)
     played_node.ai_thoughts = ai_thoughts
     
-    game.katrain.log(f"Move generation complete: {move.gtp()}", OUTPUT_DEBUG)
     return move, played_node
+
+def _generate_ai_move_with_fog(game: Game, ai_mode: str, ai_settings: Dict) -> Tuple[Move, GameNode]:
+    """Generate AI move under fog of war - AI only sees what it should see"""
+    from katrain.core.game_node import GameNode
+    from katrain.core.sgf_parser import Move
+    
+    ai_player = game.current_node.next_player
+    game.katrain.log(f"[Fog AI] Generating fog-aware move for AI player {ai_player}", OUTPUT_DEBUG)
+    
+    # Debug: Check if fog_manager is properly set
+    if not hasattr(game, 'fog_manager') or not game.fog_manager:
+        game.katrain.log(f"[Fog AI] WARNING: No fog_manager on game, falling back to normal move", OUTPUT_ERROR)
+        return _generate_ai_move_normal(game, ai_mode, ai_settings)
+    
+    # Debug: Log fog_manager state
+    fog_manager = game.fog_manager
+    game.katrain.log(f"[Fog AI] Fog manager view_distance={fog_manager.view_distance}", OUTPUT_DEBUG)
+    
+    # Get AI's visible stones based on fog of war
+    visible_stones = _get_ai_visible_stones(game, ai_player)
+    game.katrain.log(f"[Fog AI] AI can see {len(visible_stones)} stones out of {len(game.stones)} total", OUTPUT_DEBUG)
+    
+    # Debug: Log which stones are visible/invisible
+    visible_coords = {s.coords for s in visible_stones}
+    invisible_stones = [s for s in game.stones if s.coords not in visible_coords]
+    if invisible_stones:
+        game.katrain.log(f"[Fog AI] Invisible stones: {[(s.gtp(), s.player) for s in invisible_stones[:10]]}", OUTPUT_DEBUG)
+    
+    # Create a masked game state for the AI
+    try:
+        masked_game = _create_masked_game_for_ai(game, visible_stones)
+    except Exception as e:
+        game.katrain.log(f"[Fog AI] Failed to create masked game, falling back to normal move generation: {e}", OUTPUT_ERROR)
+        return _generate_ai_move_normal(game, ai_mode, ai_settings)
+    
+    # Generate move using the masked game
+    strategy = STRATEGY_REGISTRY[ai_mode](masked_game, ai_settings)
+    game.katrain.log(f"Generating fog-aware move using {strategy.__class__.__name__}", OUTPUT_DEBUG)
+    move, ai_thoughts = strategy.generate_move()
+    
+    # CRITICAL FIX: Ensure the move has the correct player
+    # The masked_game's next_player may differ from the real game's next_player
+    # because masked_game only contains visible moves, which can alter the turn order
+    if move.player != ai_player:
+        game.katrain.log(f"[Fog AI] Correcting move player from {move.player} to {ai_player}", OUTPUT_DEBUG)
+        move = Move(move.coords, player=ai_player)
+    
+    # Validate the move on the real board and play it
+    game.katrain.log(f"Validating AI move {move.gtp()} (player={move.player}) on real board", OUTPUT_DEBUG)
+    try:
+        # Try to play the move on the real game
+        played_node = game.play(move)
+        game.katrain.log(f"AI move {move.gtp()} is legal", OUTPUT_DEBUG)
+        played_node.ai_thoughts = f"[Fog AI] {ai_thoughts}"
+        return move, played_node
+    except Exception as e:
+        # Move is illegal on real board - this triggers exploration and pass turn
+        game.katrain.log(f"AI move {move.gtp()} is illegal: {e}", OUTPUT_DEBUG)
+        game.katrain.log(f"Triggering fog exploration and switching turns", OUTPUT_DEBUG)
+        
+        # Trigger ignore-blocking exploration around the illegal move
+        if not move.is_pass and hasattr(game, 'fog_manager') and game.fog_manager:
+            game.fog_manager.explore_around_point(move.coords, ai_player, ignore_blocking=True)
+            game.fog_manager.update_fog_view_snapshot()
+        
+        # Switch turns (AI loses turn due to illegal move)
+        pass_move = Move(None, player=ai_player)
+        played_node = game.play(pass_move)
+        played_node.ai_thoughts = f"[Fog AI] Attempted illegal move {move.gtp()}, passed turn. Exploration triggered."
+        
+        game.katrain.log(f"[Fog AI] After illegal move, current_node.next_player={game.current_node.next_player}", OUTPUT_DEBUG)
+        
+        return pass_move, played_node
+
+def _get_ai_visible_stones(game, ai_player):
+    """Get stones that the AI player can see based on fog of war"""
+    if not hasattr(game, 'fog_manager') or not game.fog_manager:
+        game.katrain.log(f"[Fog AI] No fog_manager found, returning all stones", OUTPUT_DEBUG)
+        return game.stones  # No fog manager, return all stones
+
+    fog_manager = game.fog_manager
+    game.katrain.log(f"[Fog AI] Fog manager found, processing visibility for {ai_player}", OUTPUT_DEBUG)
+    
+    # Validate ai_player is a valid player identifier
+    if ai_player not in ("B", "W"):
+        game.katrain.log(f"[Fog AI] Invalid ai_player '{ai_player}', returning all stones", OUTPUT_ERROR)
+        return game.stones
+    
+    visible_stones = []
+
+    # For AI, always use its own player-specific visibility from fog_manager
+    # Do NOT use fog_view_levels which is the GUI's cached display view
+    fog_levels = fog_manager.levels[ai_player]
+    game.katrain.log(f"[Fog AI] Using fog_manager.levels[{ai_player}] for AI visibility", OUTPUT_DEBUG)
+
+    # Log fog level statistics
+    total_cells = len(fog_levels) * len(fog_levels[0]) if fog_levels and len(fog_levels) > 0 else 0
+    visible_cells = sum(1 for row in fog_levels for level in row if level >= 1) if fog_levels else 0
+    game.katrain.log(f"[Fog AI] Fog levels: {visible_cells}/{total_cells} cells visible (level >= 1)", OUTPUT_DEBUG)
+
+    for stone in game.stones:
+        x, y = stone.coords
+        fog_level = fog_levels[y][x]
+
+        # AI can see stones at fog level 1 or 2
+        if fog_level >= 1:
+            visible_stones.append(stone)
+        # AI can also see its own stones and exposed enemy stones
+        elif stone.player == ai_player or (x, y) in fog_manager.exposed[ai_player]:
+            visible_stones.append(stone)
+            game.katrain.log(f"[Fog AI] Stone {stone.gtp()} ({stone.player}) visible via own/exposed rule, fog_level={fog_level}", OUTPUT_DEBUG)
+
+    # Log visibility summary
+    own_stones = sum(1 for s in game.stones if s.player == ai_player)
+    enemy_stones = len(game.stones) - own_stones
+    visible_own = sum(1 for s in visible_stones if s.player == ai_player)
+    visible_enemy = len(visible_stones) - visible_own
+    game.katrain.log(f"[Fog AI] Visibility: {visible_own}/{own_stones} own stones, {visible_enemy}/{enemy_stones} enemy stones", OUTPUT_DEBUG)
+
+    return visible_stones
+
+def _create_masked_game_for_ai(game, visible_stones):
+    """Create a masked version of the game that only shows visible stones to AI"""
+    from katrain.core.game import BaseGame, Game
+    from katrain.core.game_node import GameNode
+    from katrain.core.constants import PRIORITY_EXTRA_AI_QUERY
+    
+    # Use BaseGame to avoid automatic analysis thread
+    masked_game = BaseGame(
+        katrain=game.katrain,
+        game_properties=game.root.properties.copy()
+    )
+    
+    # Set engines reference for analysis
+    masked_game.engines = game.engines
+    
+    # Build the move sequence for visible stones only
+    visible_coords = {stone.coords for stone in visible_stones}
+    visible_moves = []
+    
+    game.katrain.log(f"[Fog AI] Building masked game with {len(visible_coords)} visible coordinates", OUTPUT_DEBUG)
+    
+    for node in game.current_node.nodes_from_root[1:]:  # Skip root
+        if node.move:
+            # For visible moves, play them normally
+            # For invisible moves, use PASS to maintain turn order
+            if not node.move.is_pass and node.move.coords in visible_coords:
+                visible_moves.append(node.move)
+            else:
+                # Use pass for invisible moves to maintain turn order
+                # This prevents "same player plays twice" errors
+                if not node.move.is_pass:
+                    game.katrain.log(f"[Fog AI] Hiding move {node.move.gtp()} (player={node.move.player}) from AI, using pass instead", OUTPUT_DEBUG)
+                pass_move = Move(None, player=node.move.player)
+                visible_moves.append(pass_move)
+    
+    visible_non_pass = sum(1 for m in visible_moves if not m.is_pass)
+    game.katrain.log(f"[Fog AI] Masked game will have {visible_non_pass} visible moves + {len(visible_moves) - visible_non_pass} passes (real game has {game.current_node.depth} moves)", OUTPUT_DEBUG)
+    
+    # Replay all visible moves in sequence using sync_branch
+    if visible_moves:
+        try:
+            current_node = masked_game.sync_branch(visible_moves)
+            masked_game.set_current_node(current_node)
+        except Exception as e:
+            game.katrain.log(f"[Fog AI] Error building masked game: {e}", OUTPUT_ERROR)
+            game.katrain.log(f"[Fog AI] Falling back to full board information", OUTPUT_DEBUG)
+            raise  # Re-raise to trigger fallback to normal move generation in the caller
+    
+    # Request analysis for the current node and wait for it to complete
+    # This is necessary because BaseGame doesn't auto-start analysis like Game does
+    game.katrain.log(f"[Fog AI] Requesting analysis for masked game current node", OUTPUT_DEBUG)
+    analysis_complete = False
+    analysis_result = None
+    analysis_error = False
+    
+    def on_analysis(result, partial_result):
+        nonlocal analysis_complete, analysis_result
+        if not partial_result:
+            analysis_result = result
+            analysis_complete = True
+            game.katrain.log(f"[Fog AI] Masked game analysis received", OUTPUT_DEBUG)
+    
+    def on_error(error_msg):
+        nonlocal analysis_error
+        analysis_error = True
+        game.katrain.log(f"[Fog AI] Masked game analysis error: {error_msg}", OUTPUT_ERROR)
+    
+    # Get the engine for the next player
+    next_player = masked_game.current_node.next_player
+    engine = masked_game.engines[next_player]
+    
+    # Request analysis
+    engine.request_analysis(
+        masked_game.current_node,
+        callback=on_analysis,
+        error_callback=on_error,
+        priority=PRIORITY_EXTRA_AI_QUERY,
+        ownership=False,
+    )
+    
+    # Wait for analysis to complete
+    game.katrain.log(f"[Fog AI] Waiting for masked game analysis...", OUTPUT_DEBUG)
+    wait_count = 0
+    while not (analysis_complete or analysis_error):
+        time.sleep(0.01)
+        wait_count += 1
+        if wait_count % 100 == 0:  # Log every 1 second
+            game.katrain.log(f"[Fog AI] Still waiting for masked game analysis ({wait_count/100:.1f}s)", OUTPUT_DEBUG)
+        engine.check_alive(exception_if_dead=True)
+    
+    if analysis_error or not analysis_result:
+        game.katrain.log(f"[Fog AI] Masked game analysis failed, falling back to normal move generation", OUTPUT_ERROR)
+        raise Exception("Masked game analysis failed")
+    
+    # Store the analysis result in the node
+    masked_game.current_node.set_analysis(analysis_result)
+    game.katrain.log(f"[Fog AI] Masked game analysis complete", OUTPUT_DEBUG)
+    
+    return masked_game

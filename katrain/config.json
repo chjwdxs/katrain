@@ -167,6 +167,10 @@
             "pro_year": 1914
         }
     },
+    "fog": {
+        "ai_uses_fog": true,
+        "view_distance": 3
+    },
     "ui_state": {
         "restoresize": true,
         "size": [],

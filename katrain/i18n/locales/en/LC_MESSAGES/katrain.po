@@ -1073,3 +1073,10 @@ msgstr "Distance of wall"
 #. tsumego: ko is good enough?
 msgid "tsumego:ko"
 msgstr "Ko allowed?"
+
+#. fog of war settings
+msgid "fog:settings"
+msgstr "Fog Settings"
+
+msgid "fog:view_distance"
+msgstr "View Distance"

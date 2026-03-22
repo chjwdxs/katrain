@@ -96,6 +96,7 @@ from katrain.core.base_katrain import KaTrainBase
 from katrain.core.engine import KataGoEngine
 from katrain.core.contribute_engine import KataGoContributeEngine
 from katrain.core.game import Game, IllegalMoveException, KaTrainSGF, BaseGame
+from katrain.core.fog_of_war import FogOfWar
 from katrain.core.sgf_parser import Move, ParseError
 from katrain.gui.popups import ConfigPopup, LoadSGFPopup, NewGamePopup, ConfigAIPopup
 from katrain.gui.theme import Theme
@@ -273,6 +274,11 @@ class KaTrainGui(Screen, KaTrainBase):
                     and not self.game.end_result
                 ):
                     self.game.analyze_undo(cn)  # not via message loop
+                # Debug: Log AI move trigger conditions
+                if self.debug_level >= OUTPUT_DEBUG:
+                    self.log(f"[AI Trigger Check] cn.analysis_complete={cn.analysis_complete}, next_player.ai={next_player.ai}, cn.children={len(cn.children)}, end_result={self.game.end_result}", OUTPUT_DEBUG)
+                    self.log(f"[AI Trigger Check] cn.player={cn.player}, cn.next_player={cn.next_player}, next_player.player={next_player.player}", OUTPUT_DEBUG)
+                
                 if (
                     cn.analysis_complete
                     and next_player.ai
@@ -280,6 +286,7 @@ class KaTrainGui(Screen, KaTrainBase):
                     and not self.game.end_result
                     and not (teaching_undo and cn.auto_undo is None)
                 ):  # cn mismatch stops this if undo fired. avoid message loop here or fires repeatedly.
+                    self.log(f"[AI Trigger] Calling _do_ai_move for node {cn}", OUTPUT_DEBUG)
                     self._do_ai_move(cn)
                     Clock.schedule_once(self._play_stone_sound, 0.25)
             if self.engine:
@@ -297,6 +304,14 @@ class KaTrainGui(Screen, KaTrainBase):
         if self.controls:
             self.controls.update_players()
             self.update_state()
+        # ensure fog snapshot remains consistent after changing player types
+        if getattr(self, "fog", None):
+            try:
+                vp = self.game.current_node.next_player
+                self.fog_view_levels = [row[:] for row in self.fog.levels[vp]]
+            except Exception as e:
+                self.log(f"Error updating fog view levels in update_player: {type(e).__name__}: {e}", OUTPUT_DEBUG)
+                self.fog_view_levels = None
         for player_setup_block in PlayerSetupBlock.INSTANCES:
             player_setup_block.update_player_info(bw, self.players_info[bw])
 
@@ -364,6 +379,21 @@ class KaTrainGui(Screen, KaTrainBase):
             analyze_fast=analyze_fast or not move_tree,
             sgf_filename=sgf_filename,
         )
+        # Initialize Fog of War for this game
+        try:
+            self.fog = FogOfWar(self.game, view_distance=self.config("fog/view_distance", 3))
+            self.fog.initialize_full_visibility()
+            # Cache initial view for the next player to move to avoid flicker
+            try:
+                vp = self.game.current_node.next_player
+                self.fog_view_levels = [row[:] for row in self.fog.levels[vp]]
+            except Exception as e:
+                self.log(f"Error caching fog view levels in new_game: {type(e).__name__}: {e}", OUTPUT_DEBUG)
+                self.fog_view_levels = None
+        except Exception as e:
+            self.log(f"Error initializing fog of war: {type(e).__name__}: {e}", OUTPUT_DEBUG)
+            self.fog = None
+            self.fog_view_levels = None
         for bw, player_info in self.players_info.items():
             player_info.sgf_rank = self.game.root.get_property(bw + "R")
             player_info.calculated_rank = None
@@ -398,7 +428,39 @@ class KaTrainGui(Screen, KaTrainBase):
             mode = self.next_player_info.strategy
             settings = self.config(f"ai/{mode}")
             if settings is not None:
-                generate_ai_move(self.game, mode, settings)
+                # snapshot player to move BEFORE AI places
+                ai_player = self.next_player_info.player
+                
+                # Set fog manager reference for AI to use
+                if getattr(self, "fog", None):
+                    self.game.fog_manager = self.fog
+                
+                move, played_node = generate_ai_move(self.game, mode, settings)
+                
+                # after AI move is applied, update fog and snapshot
+                if getattr(self, "fog", None):
+                    try:
+                        # Check if the move was successful (not a pass due to illegal move)
+                        success = not (move.is_pass and "illegal" in played_node.ai_thoughts.lower())
+                        last_coords = move.coords if move and not move.is_pass else None
+                        
+                        # If it was an illegal move that triggered exploration, fog was already updated
+                        if not success:
+                            self.log(f"AI attempted illegal move, fog exploration already triggered", OUTPUT_DEBUG)
+                        else:
+                            # Normal move, update fog for AI player
+                            self.fog.update_after_turn(ai_player, attempted=last_coords, success=True)
+                        
+                        # Also update opponent's visibility (they observe the move)
+                        opponent = "W" if ai_player == "B" else "B"
+                        self.fog.update_after_turn(opponent, attempted=last_coords, success=True)
+                        
+                        # Update view snapshot for next player
+                        vp = self.game.current_node.next_player
+                        self.fog_view_levels = [row[:] for row in self.fog.levels[vp]]
+                    except Exception as e:
+                        self.log(f"Error updating fog after AI move: {e}", OUTPUT_ERROR)
+                        self.fog_view_levels = None
             else:
                 self.log(f"AI Mode {mode} not found!", OUTPUT_ERROR)
 
@@ -434,18 +496,80 @@ class KaTrainGui(Screen, KaTrainBase):
     def _play_stone_sound(self, _dt=None):
         play_sound(random.choice(Theme.STONE_SOUNDS))
 
+    def set_fog_view_distance(self, dist):
+        """Update fog view distance from UI and apply immediately."""
+        try:
+            dist = int(round(float(dist)))
+        except Exception:
+            return
+        # clamp to reasonable range
+        dist = max(0, min(9, dist))
+        # update config
+        self._config.setdefault("fog", {})
+        if self._config["fog"].get("view_distance") == dist:
+            return
+        self._config["fog"]["view_distance"] = dist
+        self.save_config("fog")
+        # apply to runtime fog and refresh snapshot
+        if getattr(self, "fog", None):
+            try:
+                self.fog.view_distance = dist
+                # 重新计算当前/下一手玩家的可见快照，用于即时渲染
+                vp = self.game.current_node.next_player
+                # 如果 FogOfWar 提供了专门重算方法可替代下面两行
+                # 这里直接复用已维护的 levels 快照
+                self.fog_view_levels = [row[:] for row in self.fog.levels[vp]]
+                # 触发界面刷新
+                self.update_state(redraw_board=True)
+            except Exception as e:
+                self.log(f"Failed to apply fog view distance: {e}", OUTPUT_ERROR)
+
     def _do_play(self, coords):
         self.board_gui.animating_pv = None
+        player = self.next_player_info.player
         try:
             old_prisoner_count = self.game.prisoner_count["W"] + self.game.prisoner_count["B"]
-            self.game.play(Move(coords, player=self.next_player_info.player))
+            self.game.play(Move(coords, player=player))
             if old_prisoner_count < self.game.prisoner_count["W"] + self.game.prisoner_count["B"]:
                 play_sound(Theme.CAPTURING_SOUND)
             elif not self.game.current_node.is_pass:
                 self._play_stone_sound()
-
+            # Update fog on successful move/pass
+            if getattr(self, "fog", None):
+                # Update the moving player's visibility
+                self.fog.update_after_turn(player, attempted=coords, success=True)
+                # Also update the opponent's visibility (they observe the new stone)
+                opponent = "W" if player == "B" else "B"
+                self.fog.update_after_turn(opponent, attempted=coords, success=True)
+                # Cache view for the next player to move
+                try:
+                    vp = self.game.current_node.next_player
+                    self.fog_view_levels = [row[:] for row in self.fog.levels[vp]]
+                except Exception as e:
+                    self.log(f"Error caching fog view levels after play: {type(e).__name__}: {e}", OUTPUT_DEBUG)
+                    self.fog_view_levels = None
         except IllegalMoveException as e:
-            self.controls.set_status(f"Illegal Move: {str(e)}", STATUS_ERROR)
+            self.controls.set_status(f"Illegal Move: {str(e)} - Turn forfeited for exploration", STATUS_ERROR)
+            # Illegal: perform ignore-block exploration from attempted coord and switch turn by recording a pass
+            if getattr(self, "fog", None):
+                self.fog.update_after_turn(player, attempted=coords, success=False)
+                # Also update opponent's visibility
+                opponent = "W" if player == "B" else "B"
+                self.fog.update_after_turn(opponent, attempted=None, success=True)
+            try:
+                self.game.play(Move(None, player=player))
+            except IllegalMoveException:
+                pass  # Pass should always be legal, but handle gracefully just in case
+            except Exception as ex:
+                self.log(f"Unexpected error during pass after illegal move: {type(ex).__name__}: {ex}", OUTPUT_ERROR)
+            # Cache view for the next player to move
+            if getattr(self, "fog", None):
+                try:
+                    vp = self.game.current_node.next_player
+                    self.fog_view_levels = [row[:] for row in self.fog.levels[vp]]
+                except Exception as e:
+                    self.log(f"Error caching fog view levels after illegal move: {type(e).__name__}: {e}", OUTPUT_DEBUG)
+                    self.fog_view_levels = None
 
     def _do_analyze_extra(self, mode, **kwargs):
         self.game.analyze_extra(mode, **kwargs)

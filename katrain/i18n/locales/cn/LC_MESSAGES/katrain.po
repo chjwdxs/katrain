@@ -998,3 +998,10 @@ msgstr ""
 #. TODO
 msgid "engine:humanlike_model"
 msgstr "Path to human-like model"
+
+#. fog of war settings
+msgid "fog:settings"
+msgstr "迷雾设置"
+
+msgid "fog:view_distance"
+msgstr "迷雾视距"
