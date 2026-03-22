@@ -38,11 +38,7 @@ KaTrain 是由 [Sander Land](https://github.com/sanderland) 开发的围棋AI训
 
 ## 安装与运行
 
-### 方式一：直接运行可执行文件
-
-下载 `dist/KaTrain.exe` 单文件版本，双击即可运行，无需安装Python环境。
-
-### 方式二：从源码运行
+### 从源码运行
 
 ```bash
 # 克隆仓库
