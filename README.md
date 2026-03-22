@@ -1,7 +1,79 @@
-# <a name="manual"></a> KaTrain
+# 迷雾围棋 (Fog of War Go)
+
+[![License:MIT](http://img.shields.io/pypi/l/katrain)](http://en.wikipedia.org/wiki/MIT_License)
+
+## 项目简介
+
+本项目是一个支持**迷雾围棋（Fog of War Go）**的围棋AI训练与分析软件。
+
+迷雾围棋是一种创新的围棋变体，玩家只能看到己方棋子周围一定范围内的棋盘区域，其他区域被"迷雾"遮盖。这种玩法增加了游戏的不确定性和策略深度，是对传统围棋的有趣拓展。
+
+### 主要功能
+
+- **迷雾围棋模式**：支持可配置的视野范围（1-19路），体验全新的围棋玩法
+- **AI对战与分析**：基于KataGo引擎的强大AI分析能力
+- **棋局回顾**：分析对局中的关键失误，提供改进建议
+- **多种AI难度**：支持不同水平的AI对手
+- **SGF文件支持**：导入导出棋谱文件
+
+### 迷雾围棋规则
+
+在迷雾围棋中：
+- 每个玩家只能看到己方棋子周围一定范围内的棋盘
+- 视野范围外的区域被迷雾遮盖
+- 玩家只能在可见区域内落子
+- 当新落子后，视野会更新，可能发现对手在迷雾中的棋子
+
+---
+
+## 基础来源
+
+本项目基于 [KaTrain](https://github.com/sanderland/katrain) 进行二次开发。
+
+KaTrain 是由 [Sander Land](https://github.com/sanderland) 开发的围棋AI训练与分析软件，使用KataGo引擎提供强大的棋局分析功能。本 Fork 在此基础上添加了迷雾围棋功能。
+
+感谢原作者的贡献！原项目采用 MIT 许可证。
+
+---
+
+## 安装与运行
+
+### 方式一：直接运行可执行文件
+
+下载 `dist/KaTrain.exe` 单文件版本，双击即可运行，无需安装Python环境。
+
+### 方式二：从源码运行
+
+```bash
+# 克隆仓库
+git clone https://github.com/chjwdxs/katrain.git
+cd katrain
+
+# 安装依赖
+pip install -e .
+
+# 运行程序
+python katrain.py
+```
+
+### 系统要求
+
+- Python 3.9+（从源码运行需要）
+- 支持OpenCL的GPU（推荐，可获得更好的AI性能）
+
+---
+
+## 使用说明
+
+在程序主菜单中可以开启/关闭迷雾围棋模式，并设置视野范围。
+
+更多详细操作说明请参考下方的原始 KaTrain 使用手册。
+
+---
+
+# <a name="manual"></a> KaTrain 原始文档
 
 [![Latest Release](http://img.shields.io/github/release/sanderland/katrain?label=download)](http://github.com/sanderland/katrain/releases)
-[![License:MIT](http://img.shields.io/pypi/l/katrain)](http://en.wikipedia.org/wiki/MIT_License)
 [![GitHub Downloads](http://img.shields.io/github/downloads/sanderland/katrain/total?color=%23336699&label=github%20downloads)](http://github.com/sanderland/katrain/releases)
 [![PyPI Downloads](http://pepy.tech/badge/katrain)](http://pepy.tech/project/katrain)
 [![Discord](http://img.shields.io/discord/417022162348802048?logo=discord)](http://discord.com/channels/417022162348802048/629446365688365067)
